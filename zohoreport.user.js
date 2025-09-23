@@ -9,6 +9,10 @@
 // @match        https://crm.zoho.com.au/*
 // @match        https://*.zoho.com/crm/*
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/onoffgroup/userscripts/main/zohoreport.user.js
+// @updateURL    https://raw.githubusercontent.com/onoffgroup/userscripts/main/zohoreport.user.js
+// @homepageURL  https://github.com/onoffgroup/userscripts
+// @supportURL   https://github.com/onoffgroup/userscripts/issues
 // ==/UserScript==
 
 (function () {

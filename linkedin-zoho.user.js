@@ -10,6 +10,10 @@
 // @grant        GM_deleteValue
 // @grant        GM_openInTab
 // @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/onoffgroup/userscripts/main/linkedin-zoho.user.js
+// @updateURL    https://raw.githubusercontent.com/onoffgroup/userscripts/main/linkedin-zoho.user.js
+// @homepageURL  https://github.com/onoffgroup/userscripts
+// @supportURL   https://github.com/onoffgroup/userscripts/issues
 // ==/UserScript==
 
 (function () {
