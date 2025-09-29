@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LinkedIn → Zoho Lead (On-Off Group) — Stable Modal
 // @namespace    onoffgroup.linkedin.zoho
-// @version      1.1
+// @version      1.2
 // @description  Add a LinkedIn profile to Zoho CRM Leads with a quick category picker.
 // @match        https://www.linkedin.com/in/*
 // @match        https://crm.zoho.com/crm/org900416758/tab/Leads/create*
@@ -82,6 +82,31 @@ function injectCSS(css){ const s=document.createElement('style'); s.textContent=
       const subtitle = document.querySelector('.artdeco-entity-lockup__subtitle')?.textContent || '';
       if (subtitle.includes('|')) company = subtitle.split('|').pop().trim();
     }
+    if (!company) {
+      const experienceSection = (() => {
+        const headingSpan = Array.from(document.querySelectorAll('h2.pvs-header__title span[aria-hidden="true"]'))
+          .find(span => (span.textContent || '').trim().toLowerCase() === 'experience');
+        if (!headingSpan) return null;
+        return headingSpan.closest('section') || headingSpan.closest('.artdeco-card') || null;
+      })();
+      if (experienceSection) {
+        const norm = (el) => {
+          if (!el) return '';
+          const visible = el.querySelector('[aria-hidden="true"]');
+          const text = (visible?.textContent ?? el.textContent ?? '');
+          return text.replace(/\s+/g, ' ').trim();
+        };
+        const boldNodes = Array.from(experienceSection.querySelectorAll('.t-bold'));
+        const companyBold = boldNodes.find(node => node.closest('a[data-field="experience_company_logo"]'));
+        const candidateFromLogo = norm(companyBold);
+        if (candidateFromLogo) {
+          company = candidateFromLogo;
+        } else if (boldNodes.length) {
+          const candidateFallback = norm(boldNodes[0]);
+          if (candidateFallback) company = candidateFallback;
+        }
+      }
+    }
 
     const profileUrl = location.href.split('?')[0];
     return { firstName, lastName, company, profileUrl };
@@ -113,13 +138,14 @@ function openCategoryModal() {
     :host { all: initial; }
     .overlay {
       position: fixed; inset: 0;
-      background: rgba(0,0,0,0.35);
+      background: rgba(0,0,0,0.25);
     }
     .card {
       position: fixed;
-      top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      width: auto;
+      right: 20px;
+      bottom: 96px;
+      transform: none;
+      width: min(170px, calc(100vw - 40px));
       background: #fff;
       border-radius: 12px;
       box-shadow: 0 16px 48px rgba(0,0,0,0.25);

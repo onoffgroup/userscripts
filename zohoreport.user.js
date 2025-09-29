@@ -2,7 +2,7 @@
 // @name         Zoho Leads: Lead Type Counter (Fax) with Created Time filter (Lyte)
 // @description  Counts Leads per Fax; filters by Created Time (All/This week/Last week); Lyte-aware; robust pagination and render waits.
 // @namespace    https://on-off.group/
-// @version      1.7.0
+// @version      1.7.1
 // @match        https://crm.zoho.com/*
 // @match        https://crm.zoho.eu/*
 // @match        https://crm.zoho.in/*
