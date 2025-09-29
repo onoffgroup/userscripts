@@ -21,7 +21,9 @@
   // === CONFIG ===
   const LEAD_TYPE_HEADER = 'Fax';
   const CREATED_HEADER   = 'Created Time';
-  const NEXT_BUTTON_SELECTOR = 'div.lyteSingleFront.lyteIconSingleFront[role="button"][aria-label="next"]';
+  const NEXT_BUTTON_SELECTOR = 'div.lyteSingleFront.lyteIconSingleFront[role="button"][aria-label="next" i]';
+  const FIRST_PAGE_QUERY_VALUE = '1';
+  const PER_PAGE_QUERY_VALUE = '10';
 
   // Week starts on Monday (0=Sunday,1=Monday...). Change to 0 for Sunday-start weeks if you prefer.
   const WEEK_START_DAY = 1;
@@ -44,7 +46,7 @@
   });
   ui.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-      <strong>Lead Type Summary (Fax)</strong>
+      <strong>Lead Type Summary</strong>
       <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
         Created:
         <select id="oog_range" style="padding:4px 6px;border:1px solid #bbb;border-radius:6px;">
@@ -55,8 +57,7 @@
       </label>
     </div>
     <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;">
-      <button id="oog_page">Scan This Page</button>
-      <button id="oog_all">Scan All Pages</button>
+      <button id="oog_all">Count Leads</button>
       <button id="oog_reset">Reset</button>
       <button id="oog_csv" disabled>Download CSV</button>
     </div>
@@ -66,13 +67,15 @@
   document.body.appendChild(ui);
   const statusEl = ui.querySelector('#oog_status');
   const resultsEl= ui.querySelector('#oog_results');
-  const btnPage  = ui.querySelector('#oog_page');
   const btnAll   = ui.querySelector('#oog_all');
   const btnReset = ui.querySelector('#oog_reset');
   const btnCSV   = ui.querySelector('#oog_csv');
   const rangeSel = ui.querySelector('#oog_range');
 
   let counts = {}, total = 0;
+  const seenRowSignatures = new Set();
+  const seenPageSignatures = new Set();
+  const seenPageNumbers = new Set();
 
   function render(){
     const rows = Object.entries(counts).sort((a,b)=>b[1]-a[1])
@@ -80,7 +83,46 @@
     resultsEl.innerHTML = `Total (filtered): <b>${total}</b><br>${rows || '<span style="color:#777;">No data yet.</span>'}`;
     btnCSV.disabled = total===0;
   }
-  function reset(){ counts={}; total=0; render(); statusEl.textContent='Idle'; }
+  function reset(){ counts={}; total=0; seenRowSignatures.clear(); seenPageSignatures.clear(); seenPageNumbers.clear(); render(); statusEl.textContent='Idle'; }
+
+  function getCurrentPageNumber(){
+    try {
+      const url = new URL(location.href);
+      const raw = url.searchParams.get('page');
+      if (raw != null && raw !== '') {
+        const num = parseInt(raw, 10);
+        if (!Number.isNaN(num)) return num;
+      }
+    } catch {}
+    const pagerActive = document.querySelector('[data-zcqa="pager"] .active, lyte-pagination .active, .lytePagination .active');
+    if (pagerActive){
+      const text = (pagerActive.innerText||pagerActive.textContent||'').trim();
+      const num = parseInt(text,10);
+      if (!Number.isNaN(num)) return num;
+    }
+    return null;
+  }
+
+  function ensureFirstPageURL(){
+    let url;
+    try { url = new URL(location.href); }
+    catch { return false; }
+    if (!/\/list\b/.test(url.pathname)) return false;
+    let changed = false;
+    if (url.searchParams.get('page') !== FIRST_PAGE_QUERY_VALUE){
+      url.searchParams.set('page', FIRST_PAGE_QUERY_VALUE);
+      changed = true;
+    }
+    if (url.searchParams.get('per_page') !== PER_PAGE_QUERY_VALUE){
+      url.searchParams.set('per_page', PER_PAGE_QUERY_VALUE);
+      changed = true;
+    }
+    if (!changed) return false;
+    const newUrl = url.toString();
+    log('Navigating to enforced first page URL', newUrl);
+    location.assign(newUrl);
+    return true;
+  }
 
   function toCSV(){
     const esc=s=>`"${String(s).replace(/"/g,'""')}"`;
@@ -109,13 +151,16 @@
     const now = new Date();
     const sow = startOfWeek(now);
     if (which === 'last') {
-      const lastStart = new Date(sow); lastStart.setDate(sow.getDate() - 7);
-      const lastEnd = new Date(lastStart); lastEnd.setDate(lastStart.getDate() + 7); lastEnd.setMilliseconds(-1);
+      const lastStart = new Date(sow);
+      lastStart.setDate(lastStart.getDate() - 7);
+      lastStart.setHours(0,0,0,0);
+      const lastEnd = new Date(lastStart.getTime() + 7*24*60*60*1000 - 1);
       return {start:lastStart, end:lastEnd};
     }
     if (which === 'this') {
-      const thisEnd = new Date(sow); thisEnd.setDate(sow.getDate() + 7); thisEnd.setMilliseconds(-1);
-      return {start:sow, end:thisEnd};
+      const start = new Date(sow);
+      const end = new Date(now);
+      return {start, end};
     }
     return null; // 'all'
   }
@@ -176,6 +221,38 @@
     return tb ? [...tb.querySelectorAll('tr')].filter(r=>r.querySelector('td')) : [];
   }
 
+  function isRowCountable(row){
+    if (!row) return false;
+    if (row.getAttribute?.('aria-hidden') === 'true') return false;
+    const hasCells = row.querySelector?.('lyte-exptable-td, [role="cell"], td');
+    if (!hasCells) return false;
+    if (row.offsetParent !== null) return true;
+    const cs = getComputedStyle(row);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity||'1') === 0) return false;
+    return true;
+  }
+
+  function getCountableRows(){
+    return getLyteRows().filter(isRowCountable);
+  }
+
+  function rowSignature(row){
+    if (!row) return '';
+    const attrCandidates = ['data-id','data-value','data-rowid','rowid','data-rid','data-lyte-id','cxeid','id'];
+    for (const attr of attrCandidates){
+      const v = row.getAttribute?.(attr);
+      if (v) return `${attr}:${v}`;
+    }
+    const anchor = row.querySelector?.('a[href*="/crm/"]');
+    if (anchor){
+      const href = anchor.getAttribute('href') || '';
+      if (href) return `href:${href}`;
+    }
+    const cells = row.querySelectorAll?.('lyte-exptable-td, [role="cell"], td') || [];
+    const textSig = [...cells].map(c=>readLyteText(c)).join('|');
+    return `text:${textSig}`;
+  }
+
   function getCellFromRow(row, zeroIdx){
     // Lyte primary
     let cell = row.querySelector?.(`lyte-exptable-td[cxcellcol="${zeroIdx}"]`);
@@ -213,11 +290,13 @@
 
   function pageSignature(colIdx){
     // Use Fax column cells for signature
-    const rows = getLyteRows();
+    const rows = getCountableRows();
     if (!rows.length) return '';
-    const first = readLyteText(getCellFromRow(rows[0], colIdx)).slice(0,120);
-    const last  = readLyteText(getCellFromRow(rows[rows.length-1], colIdx)).slice(0,120);
-    return `${first}|${last}|${rows.length}`;
+    const firstRowSig = rowSignature(rows[0]);
+    const lastRowSig  = rowSignature(rows[rows.length-1]);
+    const midRowSig   = rows.length > 2 ? rowSignature(rows[Math.floor(rows.length/2)]) : '';
+    const firstColVal = colIdx != null ? readLyteText(getCellFromRow(rows[0], colIdx)).slice(0,120) : '';
+    return `${rows.length}|${firstRowSig}|${midRowSig}|${lastRowSig}|${firstColVal}`;
   }
 
   function countThisPageFiltered(){
@@ -226,28 +305,40 @@
     const faxIdx = colZeroIdxFromHeader(hdrFax);
     const crtIdx = colZeroIdxFromHeader(hdrCrt);
 
-    const rows = getLyteRows();
+    const rows = getCountableRows();
+    let duplicates = 0;
+    let skipped = 0;
     log('Rows on page:', rows.length, 'faxIdx=', faxIdx, 'createdIdx=', crtIdx);
 
     let added = 0;
     rows.forEach(r=>{
+      const sig = rowSignature(r);
+      if (!sig) { skipped++; return; }
+      if (seenRowSignatures.has(sig)) { duplicates++; return; }
       const faxCell = getCellFromRow(r, faxIdx);
       const crtCell = getCellFromRow(r, crtIdx);
       const faxVal  = readLyteText(faxCell);
       const crtVal  = readLyteText(crtCell);
       // Filter by Created Time
       if (isInSelectedWeek(crtVal)) {
+        seenRowSignatures.add(sig);
         const key = faxVal || '(blank)';
         counts[key] = (counts[key]||0) + 1;
         total++; added++;
+      } else {
+        seenRowSignatures.add(sig); // Mark as seen even if filtered out to avoid recount on later pages
       }
     });
-    return { faxIdx, added };
+    if (duplicates || skipped) {
+      log('Row filter stats:', {duplicates, skipped, seen: seenRowSignatures.size});
+    }
+    return { faxIdx, added, duplicates, skipped };
   }
 
   // === Robust change + render-stability wait ===
-  async function waitForChange(prevURL, prevSig, colIdx, max=20000){
+  async function waitForChange(prevURL, prevSig, colIdx, prevPageNum=null, max=20000){
     const t0=performance.now();
+    log('waitForChange: watching for transition', { prevURL, prevSig, prevPageNum });
     while (performance.now()-t0<max){
       await new Promise(r=>setTimeout(r,250));
       const urlChanged = location.href !== prevURL;
@@ -255,12 +346,21 @@
         try { const s = pageSignature(colIdx); return s && s !== prevSig; }
         catch { return false; }
       })();
-      if (urlChanged || sigChanged) {
-        log('Change detected',{urlChanged,sigChanged});
+      const pageNumChanged = (() => {
+        if (prevPageNum == null) return false;
+        try {
+          const current = getCurrentPageNumber();
+          return current != null && current !== prevPageNum;
+        } catch {
+          return false;
+        }
+      })();
+      if (urlChanged || sigChanged || pageNumChanged) {
+        log('waitForChange: detected',{urlChanged,sigChanged,pageNumChanged, elapsed: Math.round(performance.now()-t0)});
         return true;
       }
     }
-    log('Timeout waiting for change.');
+    log('waitForChange: timeout', { waited: max });
     return false;
   }
 
@@ -268,8 +368,9 @@
     const start = performance.now();
     let prev = '';
     let stableCount = 0;
+    log('waitForRenderStable: watching', { colIdx, max });
     while (performance.now()-start < max){
-      const rows = getLyteRows();
+      const rows = getCountableRows();
       if (rows.length) {
         const sig = pageSignature(colIdx);
         const firstRowFax = readLyteText(getCellFromRow(rows[0], colIdx));
@@ -281,23 +382,37 @@
 
         if (stableCount >= (RENDER_STABILITY_SAMPLES-1) &&
             (nonBlank >= 1 || ratio >= MIN_NONBLANK_RATIO)) {
-          log('Render stable:', {rows: rows.length, nonBlank, ratio: ratio.toFixed(2), firstRowFax});
+          log('waitForRenderStable: stable', {rows: rows.length, nonBlank, ratio: ratio.toFixed(2), firstRowFax, elapsed: Math.round(performance.now()-start)});
           return true;
         }
       }
       await new Promise(r=>setTimeout(r,250));
     }
-    log('Render stability timeout.');
+    log('waitForRenderStable: timeout', { waited: max });
     return false;
   }
 
-  function findNextBtn(){
-    const btn = document.querySelector(NEXT_BUTTON_SELECTOR);
+  function analyzePagerButton(btn){
     if (!btn) return { btn:null, disabled:true, reason:'not found' };
     const cs = getComputedStyle(btn);
-    const disabled = btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled')==='true' ||
-                     /disabled/i.test(btn.className) || cs.pointerEvents==='none' || btn.offsetParent===null;
-    return { btn, disabled, reason: disabled ? 'disabled/hidden' : 'ok' };
+    const hidden = btn.offsetParent===null || cs.display==='none' || cs.visibility==='hidden' || parseFloat(cs.opacity||'1')===0;
+    const attrDisabled = btn.hasAttribute('disabled') || (btn.getAttribute('aria-disabled')||'').toLowerCase()==='true' || /disabled/i.test(btn.className);
+    const pointerBlocked = cs.pointerEvents==='none';
+    const tabindexBlocked = btn.getAttribute('tabindex') === '-1';
+    const disabled = hidden || attrDisabled || pointerBlocked || tabindexBlocked;
+    const reason = hidden ? 'hidden' : attrDisabled ? 'aria/attr disabled' : pointerBlocked ? 'pointer-events none' : tabindexBlocked ? 'tabindex -1' : 'ok';
+    return { btn, disabled, reason };
+  }
+
+  function findNextBtn(){
+    const candidates = [...document.querySelectorAll(NEXT_BUTTON_SELECTOR)];
+    if (!candidates.length) return { btn:null, disabled:true, reason:'not found' };
+    for (const cand of candidates){
+      const info = analyzePagerButton(cand);
+      if (!info.disabled) return info;
+    }
+    const fallback = analyzePagerButton(candidates[0]);
+    return { ...fallback, reason: `all candidates disabled (${fallback.reason})` };
   }
 async function goToFirstPage(faxIdx) {
   const btn = document.querySelector('div[role="button"][aria-label="first"]');
@@ -325,15 +440,14 @@ async function goToFirstPage(faxIdx) {
 
   btnReset.addEventListener('click', reset);
 
-  btnPage.addEventListener('click', ()=>{
-    try{
-      const r = countThisPageFiltered(); renderAndStatus(r.added);
-    }catch(e){ statusEl.textContent='Error: '+e.message; log(e); }
-  });
-
   btnAll.addEventListener('click', async ()=>{
+    console.log('=== Zoho Leads Fax Counter started ===');
     try{
       reset();
+    if (ensureFirstPageURL()){
+      statusEl.textContent='Loading page 1 (10 per page)…';
+      return;
+    }
     statusEl.textContent='Jumping to page 1…';
     let faxIdx;
     try { faxIdx = colZeroIdxFromHeader(findLyteHeaderByLabel(LEAD_TYPE_HEADER)); } catch {}
@@ -342,9 +456,20 @@ async function goToFirstPage(faxIdx) {
     statusEl.textContent='Scanning page 1…';
     let first = countThisPageFiltered(); renderAndStatus(first.added);
     faxIdx = first.faxIdx;
+    try {
+      const sig = pageSignature(faxIdx);
+      if (sig) seenPageSignatures.add(sig);
+    } catch {}
+    const firstPageNum = getCurrentPageNumber();
+    if (firstPageNum != null) seenPageNumbers.add(firstPageNum);
 
       let guard=500;
       while(guard-- > 0){
+        log('--- Page loop iteration ---', {
+          remainingGuard: guard,
+          currentPage: getCurrentPageNumber(),
+          totalSoFar: total
+        });
         const prevURL = location.href;
         const prevSig = pageSignature(faxIdx);
 
@@ -356,8 +481,13 @@ async function goToFirstPage(faxIdx) {
         btn.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));
 
         // 1) Wait for URL/DOM change
-        const changed = await waitForChange(prevURL, prevSig, faxIdx, 20000);
-        if (!changed){ statusEl.textContent='No change after Next; assuming end. Done.'; break; }
+  const prevPageNum = getCurrentPageNumber();
+  const changed = await waitForChange(prevURL, prevSig, faxIdx, prevPageNum, 20000);
+        if (!changed){
+          statusEl.textContent='No change after Next; assuming end. Done.';
+          log('Pagination aborted: change not detected', { prevURL, prevSig, currentURL: location.href });
+          break;
+        }
 
         // 2) Small post-change delay
         await new Promise(r=>setTimeout(r, POST_CHANGE_DELAY_MS));
@@ -366,11 +496,39 @@ async function goToFirstPage(faxIdx) {
         try { faxIdx = colZeroIdxFromHeader(findLyteHeaderByLabel(LEAD_TYPE_HEADER)); } catch {}
         await waitForRenderStable(faxIdx, RENDER_MAX_WAIT_MS);
 
-        const before = total;
-        const r = countThisPageFiltered(); renderAndStatus(null, '');
-        if (total===before || r.added===0){ statusEl.textContent='No new rows (filtered); end reached. Done.'; break; }
+        let currentSig = '';
+        try {
+          currentSig = pageSignature(faxIdx);
+        } catch (err) {
+          log('Failed to compute page signature', err);
+        }
+        const currentPageNum = getCurrentPageNumber();
+        const pageAlreadySeen = currentPageNum != null && seenPageNumbers.has(currentPageNum);
+        if (currentPageNum != null) seenPageNumbers.add(currentPageNum);
+        if (currentSig) seenPageSignatures.add(currentSig);
+        if (pageAlreadySeen) {
+          statusEl.textContent = 'Reached a previously visited page; stopping to avoid loop.';
+          log('Stopping because page number already processed', { currentPageNum, seenPageNumbers: [...seenPageNumbers] });
+          break;
+        }
 
-        statusEl.textContent=`Count so far: ${total}`;
+        const before = total;
+        const r = countThisPageFiltered();
+        renderAndStatus(r.added);
+        log('Page processed', {
+          currentPageNum,
+          added: r.added,
+          duplicates: r.duplicates,
+          skipped: r.skipped,
+          total
+        });
+
+        if (total===before && r.added===0) {
+          statusEl.textContent = `Count so far: ${total} (no matching leads on this page)`;
+          log('No filtered leads on this page; continuing.');
+        } else {
+          statusEl.textContent=`Count so far: ${total}`;
+        }
       }
       statusEl.textContent=`Done. Total: ${total}`;
     }catch(e){ statusEl.textContent='Error: '+e.message; log(e); }
